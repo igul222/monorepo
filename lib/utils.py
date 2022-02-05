@@ -33,36 +33,53 @@ def print_row(*row, colwidth=16):
         return str( x).ljust(colwidth)[:colwidth]
     print("  ".join([format_val(x) for x in row]))
 
-def train_loop(forward, opt, steps, history_names=[], hook=None,
-    print_freq=1000, quiet=False, resume_step=None,
-    hook_freq=1000):
+def train_loop(
+    forward,
+    opt,
+    steps,
+    names=[],
+    hook=None,
+    hook_freq=1000,
+    print_freq=1000,
+    quiet=False,
+    resume_step=None,
+    lr_cooldown_steps=0,
+    lr_warmup_steps=0,
+    time_limit=None):
+
+    def lr_fn(step):
+        if step < lr_warmup_steps:
+            return float(step+1) / lr_warmup_steps
+        elif step >= (steps - lr_cooldown_steps):
+            return 0.1
+        else:
+            return 1.0
+    scheduler = optim.lr_scheduler.LambdaLR(opt, lr_fn)
 
     if not quiet:
-        print_row('step', 'step time', 'loss', *history_names)
+        print_row('step', 'step time', 'loss', *names)
     histories = collections.defaultdict(lambda: [])
     scaler = torch.cuda.amp.GradScaler()
     start_time = time.time()
-    step_iterator = range(steps)
-    if quiet:
-        step_iterator = tqdm.tqdm(step_iterator, leave=False)
-    for step in step_iterator:
+    for step in range(steps):
 
-        if step < (resume_step or -1):
+        if (resume_step is not None) and (step < resume_step):
+            scheduler.step()
             continue
 
         with torch.cuda.amp.autocast():
             forward_vals = forward()
-            if not (isinstance(forward_vals, tuple) or 
-                isinstance(forward_vals, list)):
-
+            if not isinstance(forward_vals, tuple):
                 forward_vals = (forward_vals,)
+
         scaler.scale(forward_vals[0]).backward()
         scaler.step(opt)
         scaler.update()
         opt.zero_grad(set_to_none=True)
+        scheduler.step()
 
         histories['loss'].append(forward_vals[0].item())
-        for name, val in zip(history_names, forward_vals[1:]):
+        for name, val in zip(names, forward_vals[1:]):
             histories[name].append(val.item())
 
         if (step==0) or (step % print_freq == (print_freq - 1)):
@@ -71,7 +88,7 @@ def train_loop(forward, opt, steps, history_names=[], hook=None,
                     step,
                     (time.time() - start_time) / (step+1),
                     np.mean(histories['loss']),
-                    *[np.mean(histories[name]) for name in history_names]
+                    *[np.mean(histories[name]) for name in names]
                 )
             histories.clear()
 
@@ -80,11 +97,9 @@ def train_loop(forward, opt, steps, history_names=[], hook=None,
 
         del forward_vals
 
-def all_params(*modules):
-    result = []
-    for m in modules:
-        result = result + list(m.parameters())
-    return result
+        if (time_limit is not None) and ((time.time()-start_time) > time_limit):
+            print('Time limit exceeded!')
+            break
 
 def save_image_grid(images, path):
     """
@@ -131,3 +146,11 @@ def save_image_grid(images, path):
 def infinite_iterator(iterator):
     while True:
         yield from iterator
+
+def get_batch(x, batch_size):
+    if isinstance(x, list):
+        idx = torch.randint(low=0, high=len(x[0]), size=(batch_size,))
+        return [v[idx] for v in x]
+    else:
+        idx = torch.randint(low=0, high=x.shape[0], size=(batch_size,))
+        return x[idx]

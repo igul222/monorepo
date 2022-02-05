@@ -13,11 +13,11 @@ def _parallel_shuffle(a, b):
 
 def mnist(split):
     """
-    split: 'train', 'test'
+    split: 'train', test'
     """
     assert(split in ['train', 'test'])
     mnist = torchvision.datasets.MNIST(DATA_DIR,
-        train=(split==train), download=True)
+        train=(split=='train'), download=True)
     X, y = mnist.data.clone(), mnist.targets.clone()
     _parallel_shuffle(X.numpy(), y.numpy())
     X = (X.float() / 256.)
