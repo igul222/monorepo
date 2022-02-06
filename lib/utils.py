@@ -4,8 +4,16 @@ import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import time
 import torch
+import warnings
 from torch import optim
-import tqdm
+
+def print_args(args_dict, title=None):
+    if title:
+        print(f'{title} args:')
+    else:
+        print('Args:')
+    for k, v in sorted(args_dict.items()):
+        print(f'\t{k}: {v}')
 
 def print_model(model):
     print('Parameters:')
@@ -76,7 +84,9 @@ def train_loop(
         scaler.step(opt)
         scaler.update()
         opt.zero_grad(set_to_none=True)
-        scheduler.step()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            scheduler.step()
 
         histories['loss'].append(forward_vals[0].item())
         for name, val in zip(names, forward_vals[1:]):
@@ -154,3 +164,10 @@ def get_batch(x, batch_size):
     else:
         idx = torch.randint(low=0, high=x.shape[0], size=(batch_size,))
         return x[idx]
+
+def batch_apply(fn, X, batch_size=1024):
+    with torch.no_grad():
+        results = []
+        for i in range(0, len(X), batch_size):
+            results.append(fn(X[i:i+batch_size]))
+        return torch.cat(results, dim=0)

@@ -10,6 +10,8 @@ import torch.nn.functional as F
 from torch import nn, optim
 
 def main(batch_size=1024, steps=10_000, print_freq=1000, dropout=0.5):
+    lib.utils.print_args(locals())
+
     X_train, y_train = lib.datasets.mnist('train')
     X_test, y_test = lib.datasets.mnist('test')
 
@@ -22,6 +24,7 @@ def main(batch_size=1024, steps=10_000, print_freq=1000, dropout=0.5):
         nn.Dropout(dropout),
         nn.Linear(512, 10)
     ).cuda()
+    lib.utils.print_model(model)
 
     def forward():
         X, y = lib.utils.get_batch([X_train, y_train], batch_size)
