@@ -165,7 +165,7 @@ def get_batch(x, batch_size):
         idx = torch.randint(low=0, high=x.shape[0], size=(batch_size,))
         return x[idx]
 
-def batch_apply(fn, X, batch_size=1024):
+def batch_apply(fn, X, batch_size=128):
     with torch.no_grad():
         results = []
         for i in range(0, len(X), batch_size):
