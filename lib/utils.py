@@ -1,3 +1,4 @@
+import argparse
 import collections
 import numpy as np
 import matplotlib; matplotlib.use('Agg')
@@ -7,12 +8,14 @@ import torch
 import warnings
 from torch import optim
 
-def print_args(args_dict, title=None):
+def print_args(args, title=None):
+    if isinstance(args, argparse.Namespace):
+        args = vars(args)
     if title:
         print(f'{title} args:')
     else:
         print('Args:')
-    for k, v in sorted(args_dict.items()):
+    for k, v in sorted(args.items()):
         print(f'\t{k}: {v}')
 
 def print_model(model):
