@@ -56,7 +56,8 @@ def train_loop(
     resume_step=None,
     lr_cooldown_steps=0,
     lr_warmup_steps=0,
-    time_limit=None):
+    time_limit=None,
+    fp16=True):
 
     def lr_fn(step):
         if step < lr_warmup_steps:
@@ -78,7 +79,7 @@ def train_loop(
             scheduler.step()
             continue
 
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(enabled=fp16):
             forward_vals = forward()
             if not isinstance(forward_vals, tuple):
                 forward_vals = (forward_vals,)
