@@ -24,14 +24,15 @@ def main(
     T=1024,
     batch_size=64,
     seq_len=256,
-    steps=100_000,
+    steps=1000,
     print_freq=100,
     lr=1e-4,
-    dim=1024):
+    dim=256):
 
     lib.utils.print_args(locals())
 
-    train_data = lib.lm_datasets.books1()
+    # train_data, _, _ = lib.lm_datasets.enwik8()
+    train_data, _, _ = lib.lm_datasets.books1()
     train_iterator = lib.lm_datasets.sequential_iterator(
         train_data, batch_size, seq_len, 0, True)
 
@@ -77,15 +78,20 @@ def main(
             x = self.input(x) + self.t_embed[t][:,:,None]
             x = self.blocks(x)
             x = self.output(x)
+            # x = F.softmax(x, dim=1)
             return (x_orig - x) * self.log_scales[t].exp()[:,None,None]
   
     model = Model().cuda()
     lib.utils.print_model(model)
 
-    beta = torch.linspace(1e-4, 0.02, T).cuda()
+    beta = torch.linspace(1e-4, 0.01, T).cuda()
+    # beta[0] = (0.2)**2 # noise floor
     alpha = 1 - beta
     alpha_bar = torch.cumprod(alpha, dim=0)
-    lib.utils.print_tensor('noise scales', (1-alpha_bar).sqrt())
+    print('noise scales:')
+    for i, x in enumerate((1-alpha_bar).sqrt().tolist()):
+        if i % 10 == 0:
+            lib.utils.print_row(i, x)
 
     def loss(X):
         # Low-discrepancy sampler for t
@@ -110,30 +116,52 @@ def main(
         lr_warmup_steps=100, lr_cooldown_steps=steps//10)
 
     with torch.no_grad():
-        X_samples = torch.randn([batch_size, 256, seq_len]).cuda()
-        for t in range(T)[::-1]:
-            X_samples = (
-                (1./alpha[t].sqrt()) *
-                (
-                    X_samples -
+        with torch.cuda.amp.autocast():
+            X_samples = torch.randn([8*batch_size, 256, seq_len]).cuda()
+            for t in range(T)[::-1]:
+                X_samples = (
+                    (1./alpha[t].sqrt()) *
                     (
-                        (beta[t]/(1-alpha_bar[t]).sqrt()) * 
-                        model(
-                            X_samples,
-                            torch.tensor([t]*batch_size).long().cuda()
+                        X_samples -
+                        (
+                            (beta[t]/(1-alpha_bar[t]).sqrt()) * 
+                            model(
+                                X_samples,
+                                torch.tensor([t]*8*batch_size).long().cuda()
+                            )
                         )
                     )
                 )
-            )
-            if t > 1:
-                X_samples += beta[t].sqrt() * torch.randn_like(X_samples).cuda()
-    print('Samples:')
-    for x in X_samples:
-        x = x.argmax(dim=0).detach().cpu().numpy().tobytes()
-        x = re.sub(rb'[^\x00-\x7F]', b'X', x) # replace non-ascii bytes with 'X'
-        x = x.decode('utf-8')
-        print(x)
-        print('---')
+                if t > 1:
+                    epsilon = torch.randn_like(X_samples).cuda()
+                    X_samples += beta[t].sqrt() * epsilon
+
+    with torch.no_grad():
+        X_samples = X_samples.argmax(dim=1)
+
+        print('Samples:')
+        for x in X_samples[:10]:
+            x = x.detach().cpu().numpy().tobytes()
+            # replace non-ascii bytes with 'X'
+            x = re.sub(rb'[^\x00-\x7F]', b'X', x)
+            x = x.decode('utf-8')
+            print(x)
+            print('---')
+
+        sample_freqs = torch.zeros([256])
+        for x in X_samples.view(-1):
+            sample_freqs[x] += 1
+
+        data_freqs = torch.zeros([256])
+        for _ in range(8):
+            X = next(train_iterator)
+            for x in X.view(-1).tolist():
+                data_freqs[x] += 1
+        
+        sample_freqs /= sample_freqs.sum()
+        data_freqs /= data_freqs.sum()
+        l1 = (sample_freqs - data_freqs).abs().sum().item()
+        print('Unigram L1:', l1)
 
 if __name__ == '__main__':
     fire.Fire(main)

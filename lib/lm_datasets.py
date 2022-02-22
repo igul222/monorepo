@@ -31,7 +31,7 @@ def books1():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 data[i:i+chunk_len] = torch.from_numpy(chunk)
-    return data
+    return data[:-10_000_000], data[-10_000_000:-5_000_000], data[-5_000_000:]
 
 def _get_slices(data, offsets, seq_len):
     # https://stackoverflow.com/q/46091111
