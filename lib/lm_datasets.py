@@ -23,14 +23,18 @@ def books1():
     print('Loading books1:')
     path = os.path.join(DATA_DIR, 'books1.txt')
     data = torch.zeros([os.path.getsize(path)], dtype=torch.uint8)
-    chunk_len = 128*1024*1024 # 128MB
+    read_chunk_len = 128*1024*1024 # 128MB
     with open(path, 'rb') as f:
-        for i in tqdm.tqdm(range(0, len(data), chunk_len)):
+        for i in tqdm.tqdm(range(0, len(data), read_chunk_len)):
             f.seek(i)
-            chunk = np.frombuffer(f.read(chunk_len), dtype='uint8')
+            chunk = np.frombuffer(f.read(read_chunk_len), dtype='uint8')
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                data[i:i+chunk_len] = torch.from_numpy(chunk)
+                data[i:i+read_chunk_len] = torch.from_numpy(chunk)
+    # Split into 100KB chunks and shuffle.
+    shuffle_chunk_len = 100_000
+    data = data[:shuffle_chunk_len*(data.shape[0]//shuffle_chunk_len)]
+    np.random.RandomState(0).shuffle(data.view(shuffle_chunk_len, -1).numpy())
     return data[:-10_000_000], data[-10_000_000:-5_000_000], data[-5_000_000:]
 
 def _get_slices(data, offsets, seq_len):

@@ -5,8 +5,15 @@ import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import time
 import torch
+import types
 import warnings
 from torch import optim
+
+class AttributeDict(dict):
+    def __getattr__(self, attr):
+        return self[attr]
+    def __setattr__(self, attr, value):
+        self[attr] = value
 
 def print_args(args, title=None):
     if isinstance(args, argparse.Namespace):

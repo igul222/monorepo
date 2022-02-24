@@ -1,1 +1,32 @@
 Tuning lstm_lm.py for good performance on books1 subject to a time constraint.
+
+Search over dim in [1024, 2048, 4096, 8192], seq len [64, 128, 256], batch size [64, 128, 256].
+
+Rows: seq_len, cols: batch_size
+dim 1024:
+                  64                128               256
+64                1.4891775723      1.4777164970      1.4762127233
+128               1.4810175393      1.4674644914      1.4812219972
+256               1.4731522480      1.4657949897      1.4744004148
+dim 2048:
+                  64                128               256
+64                1.4579026753      1.4202486537      1.4144839569
+128               1.4469830201      1.4185613483      1.4105476576
+256               1.4359338197      1.4056468077      1.4108818588
+dim 4096:
+                  64                128               256
+64                1.4827917591      1.4360484356      1.4413845959
+128               1.4759740507      1.4577732071      1.4391534243
+256               1.4934416548      1.4587861510      1.5010026056
+dim 8192:
+                  64                128               256
+64                1.9757574745      1.7281995365      2.2192547951
+128               1.6786953898      1.5586064737      err
+256               4.9595365217      err               err
+
+Overall best: dim 2048, bs 128, seq len 256.
+
+Tweak the dataset loader to shuffle the test split more properly before we proceed, and rerun the best hparams so far:
+1.4209611465861125
+
+Now fix the steps and add LR cooldown: 1.3839470841939039
