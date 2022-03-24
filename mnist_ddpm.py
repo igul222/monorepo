@@ -1,5 +1,5 @@
 """
-MNIST DDPM. Trains in 5-10 minutes.
+MNIST DDPM. Trains in about 10 minutes.
 
 Potential improvements:
 - Fourier input features
@@ -29,7 +29,7 @@ def main(
     steps=8000,
     print_freq=100,
     lr=3e-4,
-    dim=128):
+    dim=192):
 
     lib.utils.print_args(locals())
 
@@ -37,39 +37,38 @@ def main(
     X_test, y_test = lib.datasets.mnist('test')
 
     class Block(nn.Module):
-        def __init__(self, dim, dim_hid, resolution, norm='group'):
+        def __init__(self, dim, dilation, norm='group'):
             super().__init__()
-            assert(resolution in [28, 14, 7])
-            self.scale = 28 // resolution
-            self.conv1 = nn.Conv2d(dim, dim_hid, 3, padding='same')
-            self.conv2 = nn.Conv2d(dim_hid, dim, 3, padding='same')
+            self.conv1 = nn.Conv2d(dim, dim, 3,dilation=dilation,padding='same')
+            self.conv2 = nn.Conv2d(dim, dim, 3,dilation=dilation,padding='same')
             assert(norm in ['group', 'none'])
             if norm == 'group':
                 self.norm1 = nn.GroupNorm(8, dim)
-                self.norm2 = nn.GroupNorm(8, dim_hid)
+                self.norm2 = nn.GroupNorm(8, dim)
             elif norm == 'none':
                 self.norm1 = (lambda x: x)
                 self.norm2 = (lambda x: x)
         def forward(self, x):
-            z = F.avg_pool2d(x, self.scale, self.scale)
-            z = self.conv1(F.relu(self.norm1(z)))
-            z = self.conv2(F.relu(self.norm2(z)))
-            x = x + F.interpolate(z, size=28)
-            return x
+            x_res = x
+            x = self.conv1(F.relu(self.norm1(x)))
+            x = self.conv2(F.relu(self.norm2(x)))
+            return x + x_res
 
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
             self.register_buffer('t_embed', position_embedding_matrix(T, dim))
             self.input = nn.Conv2d(1, dim, 1, 1, padding='same')
-            self.block1 = Block(dim, dim,   28, norm='none')
-            self.block2 = Block(dim, dim,   28)
-            self.block3 = Block(dim, dim*4, 14)
-            self.block4 = Block(dim, dim*4, 14)
-            self.block5 = Block(dim, dim*4, 14)
-            self.block6 = Block(dim, dim*4, 14)
-            self.block7 = Block(dim, dim,   28)
-            self.block8 = Block(dim, dim,   28)
+            # We use dilated convs to keep the implementation simple, but
+            # realistically a U-net might work better.
+            self.block1 = Block(dim, 1, norm='none')
+            self.block2 = Block(dim, 1)
+            self.block3 = Block(dim, 2)
+            self.block4 = Block(dim, 2)
+            self.block5 = Block(dim, 2)
+            self.block6 = Block(dim, 2)
+            self.block7 = Block(dim, 1)
+            self.block8 = Block(dim, 1)
             self.output = nn.Conv2d(dim, 1, 1, 1, 0)
         def forward(self, x, t):
             x = x.view(-1, 1, 28, 28)
