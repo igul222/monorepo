@@ -1,5 +1,8 @@
 """
 Character-level text DDPM.
+
+'small' hparams: dim=256, steps=10_000
+'big' hparams: dim=1024, steps=1_000_000
 """
 
 import fire
@@ -24,8 +27,8 @@ def main(
     T=1024,
     batch_size=64,
     seq_len=256,
-    steps=1000,
-    print_freq=100,
+    steps=10_000,
+    print_freq=1000,
     lr=1e-4,
     dim=256):
 
@@ -37,23 +40,22 @@ def main(
         train_data, batch_size, seq_len, 0, True)
 
     class Block(nn.Module):
-        def __init__(self, dim, dim_hid, scale, norm='group'):
+        def __init__(self, dim, norm='group'):
             super().__init__()
-            self.scale = scale
-            self.conv1 = nn.Conv1d(dim, dim_hid, 5, padding='same')
-            self.conv2 = nn.Conv1d(dim_hid, dim, 5, padding='same')
+            self.conv1 = nn.Conv1d(dim, dim, 5, padding='same')
+            self.conv2 = nn.Conv1d(dim, dim, 5, padding='same')
             assert(norm in ['group', 'none'])
             if norm == 'group':
                 self.norm1 = nn.GroupNorm(8, dim)
-                self.norm2 = nn.GroupNorm(8, dim_hid)
+                self.norm2 = nn.GroupNorm(8, dim)
             elif norm == 'none':
                 self.norm1 = (lambda x: x)
                 self.norm2 = (lambda x: x)
         def forward(self, x):
-            z = F.avg_pool1d(x, self.scale, self.scale)
+            z = x
             z = self.conv1(F.relu(self.norm1(z)))
             z = self.conv2(F.relu(self.norm2(z)))
-            x = x + F.interpolate(z, scale_factor=self.scale)
+            x = x + z
             return x
 
     class Model(nn.Module):
@@ -62,25 +64,25 @@ def main(
             self.register_buffer('t_embed', position_embedding_matrix(T, dim))
             self.input = nn.Conv1d(256, dim, 1, 1, padding='same')
             self.blocks = nn.Sequential(*[
-                Block(dim, dim, 1, norm='none'),
-                Block(dim, dim, 1),
-                Block(dim, dim, 1),
-                Block(dim, dim, 1),
-                Block(dim, dim, 1),
-                Block(dim, dim, 1),
-                Block(dim, dim, 1),
-                Block(dim, dim, 1)
+                Block(dim, norm='none'),
+                Block(dim),
+                Block(dim),
+                Block(dim),
+                Block(dim),
+                Block(dim),
+                Block(dim),
+                Block(dim)
             ])
+            self.output_norm = nn.GroupNorm(8, dim)
             self.output = nn.Conv1d(dim, 256, 1, 1, 0)
             self.log_scales = nn.Parameter(torch.zeros(T))
         def forward(self, x, t):
             x_orig = x
             x = self.input(x) + self.t_embed[t][:,:,None]
             x = self.blocks(x)
-            x = self.output(x)
-            # x = F.softmax(x, dim=1)
+            x = self.output(self.output_norm(x))
             return (x_orig - x) * self.log_scales[t].exp()[:,None,None]
-  
+
     model = Model().cuda()
     lib.utils.print_model(model)
 

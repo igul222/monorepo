@@ -1,0 +1,21 @@
+Tuning transformer_lm.py for good performance on books1 subject to a time constraint.
+
+starting out with:
+    seq len 512
+    batch size 128
+    lr 3e-4
+
+grid over n_blocks=1,2,4,8 and dim=256,512,1024:
+
+Rows: n_blocks, cols: dim
+                  256               512               1024
+1                 1.9671360152      1.8813235584      1.8216680622
+2                 1.6874297333      1.5666227235      1.5058735114
+4                 1.6314984939      1.5069878065      1.4626355564
+8                 1.6095614157      1.5202527416      1.4929680274
+
+-----------------------
+
+just a big grid over everything... we'll run this until we get bored, goal is just to optimize.
+
+fire -n transformerlm_books1_2h_biggrid --batch --replicas=4 -x jagupard20 "python -u -m lib.grid_search transformer_lm --dataset=books1 --lr=[1e-4,3e-4,1e-3] --seq_len=[256,512,1024] --bs=[64,128,256] --n_blocks=[1,2,4,8] --dim=[256,512,1024] --n_heads=[1,2,4,8]"
