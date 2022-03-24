@@ -1,7 +1,7 @@
 """
 LSTM language model. The enwik8 hparams are tuned for test accuracy (1.46 bpc).
 The books1 hparams are tuned for test accuracy subject to a time constraint of
-2 hours on a Titan V (1.38bpc).
+~2 hours on a Titan V (1.38bpc).
 """
 
 import fire
@@ -21,19 +21,18 @@ def main(**args):
     args.setdefault('n_layers', 1)
     args.setdefault('seq_len', 256)
     args.setdefault('reset_prob', 0.01)
+    args.setdefault('batch_size', 256)
     if args.dataset == 'enwik8':
         args.setdefault('steps', 10_000)
         args.setdefault('dim', 4096)
-        args.setdefault('batch_size', 256)
     elif args.dataset == 'books1':
-        args.setdefault('steps', 66_000)
+        args.setdefault('steps', 40_000)
         args.setdefault('dim', 2048)
-        args.setdefault('batch_size', 128)
     lib.utils.print_args(args)
 
-    if dataset == 'enwik8':
+    if args.dataset == 'enwik8':
         train_data, _, test_data = lib.lm_datasets.enwik8()
-    elif dataset == 'books1':
+    elif args.dataset == 'books1':
         train_data, _, test_data = lib.lm_datasets.books1()
 
     train_iterator = lib.lm_datasets.sequential_iterator(
@@ -80,9 +79,8 @@ def main(**args):
         return loss / 0.69314718 # BPC
 
     opt = optim.Adam(model.parameters(), lr=args.lr)
-    print('WARNING: 2-hour time limit for books1 tuning.')
     lib.utils.train_loop(forward, opt, args.steps, print_freq=1000,
-        lr_cooldown_steps=steps//10)
+        lr_cooldown_steps=args.steps//10)
 
     state = (
         torch.zeros([args.n_layers, 1, args.dim]).half().cuda(),
