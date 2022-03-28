@@ -7,17 +7,10 @@ import math
 import numpy as np
 import lib.datasets
 import lib.utils
+import lib.transformer
 import torch
 import torch.nn.functional as F
 from torch import nn, optim
-
-def position_embedding_matrix(n, dim):
-    position = torch.arange(n).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, dim, 2) * (-math.log(10000.0) / dim))
-    pe = torch.zeros(n, dim)
-    pe[:, 0::2] = torch.sin(position * div_term)
-    pe[:, 1::2] = torch.cos(position * div_term)
-    return pe
 
 def main(
     T=1024,
@@ -39,7 +32,7 @@ def main(
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
-            self.register_buffer('t_embed', position_embedding_matrix(T, dim))
+            self.register_buffer('t_codes', lib.transformer.position_codes(T, dim))
             self.h1 = nn.Linear(784, dim)
             self.h2 = nn.Linear(dim, dim)
             self.h3 = nn.Linear(dim, dim)
@@ -48,7 +41,7 @@ def main(
 
         def forward(self, x, t):
             x_orig = x
-            x = F.gelu(self.h1(x) + self.t_embed[t])
+            x = F.gelu(self.h1(x) + self.t_codes[t])
             x = F.gelu(self.h2(x))
             x = F.gelu(self.h3(x))
             x = self.h4(x)

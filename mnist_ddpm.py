@@ -15,14 +15,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn, optim
 
-def position_embedding_matrix(n, dim):
-    position = torch.arange(n).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, dim, 2) * (-math.log(10000.0) / dim))
-    pe = torch.zeros(n, dim)
-    pe[:, 0::2] = torch.sin(position * div_term)
-    pe[:, 1::2] = torch.cos(position * div_term)
-    return pe
-
 def main(
     T=1024,
     batch_size=64,
@@ -57,7 +49,8 @@ def main(
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
-            self.register_buffer('t_embed', position_embedding_matrix(T, dim))
+            self.register_buffer(
+                't_codes', lib.transformer.position_codes(T, dim))
             self.input = nn.Conv2d(1, dim, 1, 1, padding='same')
             # We use dilated convs to keep the implementation simple, but
             # realistically a U-net might work better.
@@ -72,7 +65,7 @@ def main(
             self.output = nn.Conv2d(dim, 1, 1, 1, 0)
         def forward(self, x, t):
             x = x.view(-1, 1, 28, 28)
-            x = self.input(x) + self.t_embed[t][:,:,None,None]
+            x = self.input(x) + self.t_codes[t][:,:,None,None]
             x = self.block1(x)
             x = self.block2(x)
             x = self.block3(x)

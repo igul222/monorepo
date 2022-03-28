@@ -9,19 +9,12 @@ import fire
 import math
 import numpy as np
 import lib.lm_datasets
+import lib.transformer
 import lib.utils
 import re
 import torch
 import torch.nn.functional as F
 from torch import nn, optim
-
-def position_embedding_matrix(n, dim):
-    position = torch.arange(n).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, dim, 2) * (-math.log(10000.0) / dim))
-    pe = torch.zeros(n, dim)
-    pe[:, 0::2] = torch.sin(position * div_term)
-    pe[:, 1::2] = torch.cos(position * div_term)
-    return pe
 
 def main(
     T=1024,
@@ -61,7 +54,7 @@ def main(
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
-            self.register_buffer('t_embed', position_embedding_matrix(T, dim))
+            self.register_buffer('t_codes', lib.transformer.pos_codes(T, dim))
             self.input = nn.Conv1d(256, dim, 1, 1, padding='same')
             self.blocks = nn.Sequential(*[
                 Block(dim, norm='none'),
@@ -78,7 +71,7 @@ def main(
             self.log_scales = nn.Parameter(torch.zeros(T))
         def forward(self, x, t):
             x_orig = x
-            x = self.input(x) + self.t_embed[t][:,:,None]
+            x = self.input(x) + self.t_codes[t][:,:,None]
             x = self.blocks(x)
             x = self.output(self.output_norm(x))
             return (x_orig - x) * self.log_scales[t].exp()[:,None,None]

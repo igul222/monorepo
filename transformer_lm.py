@@ -6,10 +6,10 @@ Transformer character-level LM. Hyperparams tuned for books1 given approx.
 import fire
 import lib.lm_datasets
 import lib.utils
+import lib.transformer
 import numpy as np
 import os
 import torch
-import torch.utils.checkpoint
 import torch.nn.functional as F
 import tqdm
 from torch import nn, optim
@@ -34,62 +34,22 @@ def main(**args):
     train_iterator = lib.lm_datasets.random_iterator(
         train_data, args.batch_size, args.seq_len+1)
 
-    class TransformerBlock(nn.Module):
-        def __init__(self, dim):
-            super().__init__()
-            self.attn = nn.MultiheadAttention(dim, args.n_heads,
-                batch_first=True)
-            attn_mask = torch.zeros([args.seq_len, args.seq_len])
-            for i in range(args.seq_len):
-                attn_mask[i, i+1:] = float('-inf')
-            self.register_buffer('attn_mask', attn_mask)
-            self.linear1 = nn.Linear(dim, 4*dim)
-            self.linear2 = nn.Linear(4*dim, dim)
-            self.norm1 = nn.LayerNorm(dim)
-            self.norm2 = nn.LayerNorm(dim)
-
-        def forward(self, x):
-            # Self-attention block
-            x_res = x
-            x = self.norm1(x)
-            x = self.attn(x, x, x, attn_mask=self.attn_mask)[0]
-            x = x + x_res
-            # Feedforward block
-            x_res = x
-            x = self.norm2(x)
-            x = self.linear1(x)
-            x = F.gelu(x)
-            x = self.linear2(x)
-            x = x + x_res
-            return x
-
     class Transformer(nn.Module):
         def __init__(self):
             super().__init__()
             self.embedding = nn.Embedding(256, args.dim)
-            position = torch.arange(args.seq_len).unsqueeze(1)
-            div_term = torch.exp(
-                torch.arange(0, args.dim, 2) * float(-np.log(10000) / args.dim))
-            pe = torch.zeros(1, args.seq_len, args.dim)
-            pe[0, :, 0::2] = torch.sin(position * div_term)
-            pe[0, :, 1::2] = torch.cos(position * div_term)
-            self.register_buffer('pos_embedding', pe)
-
+            self.register_buffer('pos_codes',
+                lib.transformer.position_codes(args.dim))
             self.blocks = nn.Sequential(*[
-                TransformerBlock(args.dim)
+                lib.transformer.TransformerBlock(args.dim)
                 for _ in range(args.n_blocks)
             ])
             self.output_norm = nn.LayerNorm(args.dim)
             self.output = nn.Linear(args.dim, 256)
 
-        def forward(self, x, checkpoint=False):
-            x = self.embedding(x)
-            x = x + self.pos_embedding
-            if checkpoint:
-                x = torch.utils.checkpoint.checkpoint_sequential(
-                    self.blocks, args.n_blocks, x)
-            else:
-                x = self.blocks(x)
+        def forward(self, x):
+            x = self.embedding(x) + self.pos_codes[None, :x.shape[0], :]
+            x = self.blocks(x)
             x = self.output_norm(x)
             x = self.output(x)
             return x
