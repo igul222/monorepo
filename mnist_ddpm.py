@@ -50,7 +50,7 @@ def main(
         def __init__(self):
             super().__init__()
             self.register_buffer(
-                't_codes', lib.transformer.position_codes(T, dim))
+                't_codes', lib.transformer.position_codes(dim, T))
             self.input = nn.Conv2d(1, dim, 1, 1, padding='same')
             # We use dilated convs to keep the implementation simple, but
             # realistically a U-net might work better.

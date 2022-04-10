@@ -64,7 +64,8 @@ def train_loop(
     lr_cooldown_steps=0,
     lr_warmup_steps=0,
     time_limit=None,
-    fp16=True):
+    fp16=True,
+    grad_accumulation_steps=1):
 
     def lr_fn(step):
         if step < lr_warmup_steps:
@@ -86,22 +87,27 @@ def train_loop(
             scheduler.step()
             continue
 
-        with torch.cuda.amp.autocast(enabled=fp16):
-            forward_vals = forward()
-            if not isinstance(forward_vals, tuple):
-                forward_vals = (forward_vals,)
+        for inner_step in range(grad_accumulation_steps):
+            with torch.cuda.amp.autocast(enabled=fp16):
+                forward_vals = forward()
+                if not isinstance(forward_vals, tuple):
+                    forward_vals = (forward_vals,)
 
-        scaler.scale(forward_vals[0]).backward()
+            scaler.scale(forward_vals[0] / grad_accumulation_steps).backward()
+
+            histories['loss'].append(forward_vals[0].item())
+            for name, val in zip(names, forward_vals[1:]):
+                histories[name].append(val.item())
+
+            del forward_vals
+
         scaler.step(opt)
         scaler.update()
         opt.zero_grad(set_to_none=True)
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             scheduler.step()
-
-        histories['loss'].append(forward_vals[0].item())
-        for name, val in zip(names, forward_vals[1:]):
-            histories[name].append(val.item())
 
         if (step==0) or (step % print_freq == (print_freq - 1)):
             if not quiet:
@@ -115,8 +121,6 @@ def train_loop(
 
         if step % hook_freq == (hook_freq - 1) and hook is not None:
             hook(step)
-
-        del forward_vals
 
         if (time_limit is not None) and ((time.time()-start_time) > time_limit):
             print('Time limit exceeded!')

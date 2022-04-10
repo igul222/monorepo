@@ -10,8 +10,9 @@ import tqdm
 import warnings
 import zipfile
 
-DATA_DIR = os.path.realpath(
-    os.path.expanduser(f'~/local/{socket.gethostname()}/data'))
+# DATA_DIR = os.path.realpath(
+#     os.path.expanduser(f'~/local/{socket.gethostname()}/data'))
+DATA_DIR = os.path.expanduser('~/data')
 
 def enwik8():
     data = zipfile.ZipFile(

@@ -5,8 +5,9 @@ import torch
 import torchvision.datasets
 from torch import nn
 
-DATA_DIR = os.path.realpath(
-    os.path.expanduser(f'~/local/{socket.gethostname()}/data'))
+# DATA_DIR = os.path.realpath(
+#     os.path.expanduser(f'~/local/{socket.gethostname()}/data'))
+DATA_DIR = os.path.expanduser('~/data')
 
 def _parallel_shuffle(a, b):
     rng_state = np.random.get_state()

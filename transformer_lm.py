@@ -39,7 +39,7 @@ def main(**args):
             super().__init__()
             self.embedding = nn.Embedding(256, args.dim)
             self.register_buffer('pos_codes',
-                lib.transformer.position_codes(args.dim))
+                lib.transformer.position_codes(args.dim, args.seq_len))
             self.blocks = nn.Sequential(*[
                 lib.transformer.TransformerBlock(args.dim)
                 for _ in range(args.n_blocks)

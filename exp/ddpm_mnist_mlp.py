@@ -32,7 +32,7 @@ def main(
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
-            self.register_buffer('t_codes', lib.transformer.position_codes(T, dim))
+            self.register_buffer('t_codes', lib.transformer.position_codes(dim, T))
             self.h1 = nn.Linear(784, dim)
             self.h2 = nn.Linear(dim, dim)
             self.h3 = nn.Linear(dim, dim)
