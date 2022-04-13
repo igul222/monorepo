@@ -24,7 +24,8 @@ class TransformerBlock(nn.Module):
         if self.norm1 is not None:
             x = self.norm1(x)
         if self.autoregressive:
-            mask = torch.full([x.shape[1], x.shape[1]], float('-inf')).triu_(1)
+            mask = torch.full([x.shape[1], x.shape[1]], float('-inf'),
+                device='cuda').triu_(1)
         else:
             mask = None
         x = self.attn(x, x, x, attn_mask=mask)[0]

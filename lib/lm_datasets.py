@@ -2,6 +2,7 @@
 Datasets and helpers for language modeling.
 """
 
+import collections
 import numpy as np
 import os
 import socket
@@ -37,6 +38,27 @@ def books1():
     data = data[:shuffle_chunk_len*(data.shape[0]//shuffle_chunk_len)]
     np.random.RandomState(0).shuffle(data.view(shuffle_chunk_len, -1).numpy())
     return data[:-10_000_000], data[-10_000_000:-5_000_000], data[-5_000_000:]
+
+def e2e(vocab_size):
+    vocab = collections.Counter()
+    for split in ['train', 'valid', 'test']:
+        with open(f'/u/scr/xlisali/e2e_data/src1_{split}.txt', 'r') as f:
+            text = f.read()
+            for word in text.split(" "):
+                vocab[word] += 1
+    idx2word = [w for w, _ in vocab.most_common(vocab_size-1)]
+    idx2word.append('[UNK]')
+    word2idx = {word:idx for idx, word in enumerate(idx2word)}
+
+    unk_idx = word2idx['[UNK]']
+    split_data = []
+    for split in ['train', 'valid', 'test']:
+        with open(f'/u/scr/xlisali/e2e_data/src1_{split}.txt', 'r') as f:
+            text = f.read()
+            tokens = [word2idx.get(word, unk_idx) for word in text.split(' ')]    
+            split_data.append(torch.tensor(tokens))
+
+    return split_data
 
 def _get_slices(data, offsets, seq_len):
     # https://stackoverflow.com/q/46091111
