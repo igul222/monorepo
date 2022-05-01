@@ -1,8 +1,3 @@
-"""
-Transformer LM. Hyperparams tuned for books1 given approx.
-2 hours on a Titan V.
-"""
-
 import fire
 import lib.lm_datasets
 import lib.utils
@@ -16,45 +11,37 @@ from torch import nn, optim
 
 def main(**args):
     args = lib.utils.AttributeDict(args)
-    args.setdefault('dataset', 'books1')
     args.setdefault('lr', 3e-4)
-    args.setdefault('seq_len', 1024)
+    args.setdefault('seq_len', 16)
     args.setdefault('n_heads', 4)
-    args.setdefault('batch_size', 16)
-    args.setdefault('steps', 44_000)
+    args.setdefault('batch_size', 1024)
+    args.setdefault('steps', 2000)
     args.setdefault('dim', 1024)
     args.setdefault('n_blocks', 4)
-    args.setdefault('vocab_size', 256) # 818 to match Lisa's E2E.
-    args.setdefault('print_freq', 1000)
+    args.setdefault('vocab_size', 821) # 821 to match Lisa's E2E.
+    args.setdefault('print_freq', 100)
 
     lib.utils.print_args(args)
 
-    if args.dataset == 'enwik8':
-        train_data, _, test_data = lib.lm_datasets.enwik8()
-    elif args.dataset == 'books1':
-        train_data, _, test_data = lib.lm_datasets.books1()
-    elif args.dataset == 'e2e':
-        train_data, _, test_data = lib.lm_datasets.e2e(args.vocab_size)
-
-    train_iterator = lib.lm_datasets.random_iterator(
-        train_data, args.batch_size, args.seq_len+1)
+    train_data, _, test_data = lib.lm_datasets.e2e(args.vocab_size)
+    test_data = torch.cat(test_data)
 
     class Transformer(nn.Module):
         def __init__(self):
             super().__init__()
-            self.embedding = nn.Embedding(args.vocab_size, args.dim)
             self.register_buffer('pos_codes',
                 lib.transformer.position_codes(args.dim, args.seq_len))
             self.blocks = nn.Sequential(*[
                 lib.transformer.TransformerBlock(args.dim, args.n_heads,
-                    autoregressive=True)
+                    autoregressive=True, dropout=0.5)
                 for _ in range(args.n_blocks)
             ])
             self.output_norm = nn.LayerNorm(args.dim)
             self.output = nn.Linear(args.dim, args.vocab_size)
 
         def forward(self, x):
-            x = self.embedding(x) + self.pos_codes[None,:,:]
+            x = self.output.weight[x, :] * float(np.sqrt(args.dim))
+            x = x + self.pos_codes[None,:,:]
             x = self.blocks(x)
             x = self.output_norm(x)
             x = self.output(x)
@@ -64,7 +51,10 @@ def main(**args):
     lib.utils.print_model(model)
 
     def forward():
-        X = next(train_iterator).cuda().long()
+        np.random.shuffle(train_data)
+        X = train_data[:args.batch_size*(args.seq_len//8)]
+        X = torch.cat(X)[:args.batch_size * (args.seq_len+1)].cuda().long()
+        X = X.view(args.batch_size, args.seq_len+1)
         logits = model(X[:, :-1])
         loss = F.cross_entropy(
             logits.reshape(-1, args.vocab_size),
@@ -73,8 +63,9 @@ def main(**args):
         return loss / 0.69314718 # bits per token
 
     def hook(_):
+        model.eval()
         # This evaluation is very slightly biased but low-variance.
-        k = args.seq_len // 64 # Number of tokens to evaluate per forward pass.
+        k = 1 # Number of tokens to evaluate per forward pass.
         test_data_unfolded = test_data.unfold(0, args.seq_len+1, k)
         losses = []
         with torch.cuda.amp.autocast():
@@ -91,13 +82,12 @@ def main(**args):
                     del X, logits, loss
         test_loss = np.mean(losses)
         print(f'Test loss: {test_loss}')
+        model.train()
         return test_loss
 
     opt = optim.Adam(model.parameters(), lr=args.lr)
     lib.utils.train_loop(forward, opt, args.steps, print_freq=args.print_freq,
-        lr_cooldown_steps=args.steps // 10)
-
-    hook(None)
+        lr_cooldown_steps=1000, hook=hook, hook_freq=500)
 
 if __name__ == '__main__':
     fire.Fire(main)

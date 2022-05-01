@@ -1,5 +1,5 @@
 """
-Character-level continuous-time variational diffusion model.
+Text VDM with embeddings.
 """
 
 import collections
@@ -8,8 +8,7 @@ import math
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-import lib.ddp
-import lib.diffusion_lm_datasets
+import lib.lm_datasets
 import lib.transformer
 import lib.utils
 import re
@@ -20,19 +19,15 @@ import torch.nn.functional as F
 import tqdm
 import warnings
 from torch import nn, optim, autograd
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 def main(**args):
     args = lib.utils.AttributeDict(args)
-    args.setdefault('dataset', 'rocstories_gpt')
+    args.setdefault('dataset', 'books1_char')
     args.setdefault('dim', 1024)
     args.setdefault('lr', 1e-4)
-    args.setdefault('grad_accumulation_steps', 1)
     args.setdefault('n_blocks', 9)
     args.setdefault('n_heads', 8)
     args.setdefault('noise_schedule_lr', 3e-3)
-    args.setdefault('rank', 0)
-    args.setdefault('reweighted_loss', False)
     args.setdefault('save_weights', False)
     args.setdefault('steps', 1_000_000)
     args.setdefault('print_freq', 1000)
@@ -43,40 +38,82 @@ def main(**args):
         args.setdefault('gamma_0', 2.0)
         args.setdefault('gamma_1', 12.0)
         args.setdefault('batch_size', 128)
+        args.setdefault('seq_len', 128)
+        args.setdefault('vocab_size', 256)
     elif args.dataset == 'books1_word':
         args.setdefault('gamma_0', 5.0)
         args.setdefault('gamma_1', 15.0)
         args.setdefault('batch_size', 192)
-    elif args.dataset in ['e2e', 'e2e_gpt']:
+        args.setdefault('seq_len', 64)
+        args.setdefault('vocab_size', 8192)
+    elif args.dataset == 'e2e':
         args.setdefault('gamma_0', 3.0)
         args.setdefault('gamma_1', 13.0)
         args.setdefault('batch_size', 256)
-    elif args.dataset in ['rocstories', 'rocstories_gpt']:
-        args.setdefault('gamma_0', 5.0)
-        args.setdefault('gamma_1', 15.0)
-        args.setdefault('batch_size', 96)
+        args.setdefault('seq_len', 64)
+        args.setdefault('vocab_size', 821)
+    elif args.dataset == 'rocstories':
+        args.setdefault('gamma_0', 3.0)
+        args.setdefault('gamma_1', 13.0)
+        args.setdefault('batch_size', 128)
+        args.setdefault('seq_len', 64)
+        args.setdefault('vocab_size', 11043)
+
     lib.utils.print_args(args)
 
     # Lots of annoying big/small numbers throughout this code, so we'll do
     # everything in fp32 by default and explicitly switch to fp16 where
     # appropriate.
 
-    dataset = lib.diffusion_lm_datasets.REGISTRY[args.dataset](args.batch_size)
-    (train_iterator, test_iterator), (word2idx, idx2word) = dataset
+    # Each dataset has slightly different loading code:
 
-    typical_seq_len = next(train_iterator)[0].shape[1]
-    vocab_size = len(word2idx)
-    print(f'typical_seq_len: {typical_seq_len}, vocab_size: {vocab_size}')
+    if args.dataset in ['books1_char', 'books1_word']:
 
-    x_scale = float(np.sqrt(vocab_size))
+        dataset = lib.lm_datasets.books1()
+        (train_data, _, test_data), (word2idx, idx2word) = dataset
+
+        train_iterator = lib.lm_datasets.random_iterator(
+            train_data, args.batch_size, args.seq_len)
+        test_iterator = lib.lm_datasets.random_iterator(
+            test_data, args.batch_size, args.seq_len)
+
+    elif args.dataset == 'e2e':
+
+        dataset = lib.lm_datasets.e2e(args.vocab_size)
+        (train_data, _, test_data), (word2idx, idx2word) = dataset
+        train_data = torch.cat(train_data)
+        test_data = torch.cat(test_data)
+
+        train_iterator = lib.lm_datasets.random_iterator(
+            train_data, args.batch_size, args.seq_len)
+        test_iterator = lib.lm_datasets.random_iterator(
+            test_data, args.batch_size, args.seq_len)
+
+    elif args.dataset == 'rocstories':
+
+        dataset = lib.lm_datasets.rocstories(args.vocab_size)
+        (train_data, _, test_data), (word2idx, idx2word) = dataset
+
+        train_iterator = lib.lm_datasets.padded_random_iterator(
+            train_data, args.batch_size, args.seq_len, word2idx[b'PAD'])
+        test_iterator = lib.lm_datasets.padded_random_iterator(
+            test_data, args.batch_size, args.seq_len, word2idx[b'PAD'])
+
 
     def gaussian_kl(mu_p, sigma_p, mu_q, sigma_q):
         """KL(p||q)"""
-        return (
-            sigma_q.log() - sigma_p.log()
-            + (sigma_p**2 + (mu_p - mu_q)**2)/(2*sigma_q**2)
-            - 0.5
-        )
+        # return (
+        #     sigma_q.log() - sigma_p.log()
+        #     + (sigma_p**2 + (mu_p - mu_q)**2)/(2*sigma_q**2)
+        #     - 0.5
+        # )
+        result = mu_p.clone()
+        result.sub_(mu_q)
+        result.pow_(2)
+        result.add_(sigma_p**2)
+        result.div_(2 * sigma_q**2)
+        result.add_(sigma_q.log() - sigma_p.log() - 0.5)
+        return result
 
     def cross_entropy(logits, x, reduction):
         """Memory-efficient drop-in replacement for F.cross_entropy."""
@@ -88,42 +125,14 @@ def main(**args):
             torch.arange(x.shape[1], device='cuda')[None,:],
         ]
 
-    def sqrt_sigmoid(x):
-        """Numerically stable sqrt(sigmoid(x))"""
-        return torch.sigmoid(x.double()).sqrt().float()
-
-    class InputPreprocessor(nn.Module):
-        """Normalizes noisy simplex vectors at the input of the model."""
-        def __init__(self):
-            super().__init__()
-            self.gamma_mlp = nn.Sequential(
-                nn.Linear(1, 1024),
-                nn.Tanh(),
-                nn.Linear(1024, vocab_size+1)
-            )
-
-        def forward(self, z, gamma, input_weights):
-            gamma = gamma - ((args.gamma_0 + args.gamma_1) / 2.)
-            gamma = gamma / ((args.gamma_1 - args.gamma_0) / 2.)
-            gamma_mlp_out = self.gamma_mlp(gamma[:,None])
-            with torch.cuda.amp.autocast(enabled=False):
-                gamma_mlp_out = gamma_mlp_out.float()
-                bias = gamma_mlp_out[:,None,1:]
-                temp = gamma_mlp_out[:,0,None,None]
-                # z = log_p(xt|x0) up to a const.
-                z.mul_(F.softplus(temp))
-                z.add_(bias)
-                result = F.softmax(z, dim=2)
-                result = result @ input_weights.T
-                result.mul_(x_scale)
-            return result
-
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
+            self.embeddings = nn.Parameter(
+                torch.randn(args.vocab_size, args.dim))
+            self.embeddings_A = nn.Parameter(torch.eye(args.dim))
             self.register_buffer('pos_codes',
-                lib.transformer.position_codes(args.dim))
-            self.input_preprocessor = InputPreprocessor()
+                lib.transformer.position_codes(args.dim, args.seq_len))
             self.blocks = nn.ModuleList([
                 lib.transformer.TransformerBlock(args.dim, args.n_heads,
                     output_scale=float(1./np.sqrt(args.n_blocks))
@@ -131,16 +140,27 @@ def main(**args):
                 for _ in range(args.n_blocks)
             ])
             self.output_norm = nn.LayerNorm(args.dim)
-            self.output = nn.Linear(args.dim, vocab_size)
-            self.output.bias.data.zero_()
+            self.output = nn.Linear(args.dim, args.dim)
+
+            self.decoder_A = nn.Parameter(torch.eye(args.dim))
+            self.decoder_bias = nn.Parameter(torch.zeros([args.vocab_size]))
 
         def forward(self, z, gamma):
-            x = self.input_preprocessor(z, gamma, self.output.weight.T)
-            x.add_(self.pos_codes[None,:x.shape[1],:])
+            x = z
+            x.add_(self.pos_codes[None,:,:])
             for i in range(len(self.blocks)):
                 x = self.blocks[i](x)
             x = self.output_norm(x)
             return self.output(x)
+
+        def decode(self, z):
+            x = z
+            x = x @ (self.decoder_A @ self.decoder_A.T)
+            # x.div_(float(np.sqrt(args.dim)))
+            x = x @ (self.embeddings_A @ self.embeddings_A.T)
+            x = x @ self.embeddings.T
+            x.add_(self.decoder_bias[None,None,:])
+            return x
 
     class NoiseSchedule(nn.Module):
         def __init__(self):
@@ -178,9 +198,6 @@ def main(**args):
         noise_schedule.load_state_dict(
             torch.load(os.path.join(args.weights_path, 'noise_schedule.pt')))
 
-    ddp_model = DDP(model)
-    ddp_noise_schedule = DDP(noise_schedule)
-
     def compute_losses(x):
         t = torch.empty([args.batch_size], device='cuda')
         # First two entries of t are used for reconst_loss and prior_loss below
@@ -193,77 +210,60 @@ def main(**args):
         with torch.enable_grad():
             # Don't propagate grads for the first two entries of t
             gamma = torch.cat([
-                ddp_noise_schedule(t[:2]).detach(),
-                ddp_noise_schedule(t[2:])
+                noise_schedule(t[:2]).detach(),
+                noise_schedule(t[2:])
             ])
             gamma_prime = autograd.grad(gamma.sum(), [t], create_graph=True)[0]
         # Manually edit gradients so that the noise schedule minimizes
-        # E[heuristic^2] while the rest of the model minimizes E[heuristic].
+        # E[nll^2] while the rest of the model minimizes E[nll].
         def set_grad_hook(tensor):
             if tensor.requires_grad:
                 def grad_hook(grad):
                     handle.remove()
                     new_grad = torch.clone(grad.detach())
-                    new_grad[2:] *= 2. * heuristic[2:].detach()
+                    new_grad[2:] *= 2. * diffusion_loss[2:].detach()
                     return new_grad
                 handle = tensor.register_hook(grad_hook)
         gamma = gamma.clone()
         set_grad_hook(gamma)
         set_grad_hook(gamma_prime)
         # Quantities derived from gamma and gamma_prime:
-        alpha = sqrt_sigmoid(-gamma)
-        sigma = sqrt_sigmoid(gamma)
+        alpha = torch.sigmoid(-gamma).sqrt()
+        sigma = torch.sigmoid(gamma).sqrt()
         snr_prime = -(-gamma).exp() * gamma_prime # SNR = exp(-gamma)
+        # Scaled by a constant to keep the loss in a reasonable range:
+        snr_prime_scaled = -(-gamma + args.gamma_0).exp() * gamma_prime
 
-        # Construct z (with reparam. trick gradients) using only in-place ops
-        z = torch.randn([x.shape[0], x.shape[1], vocab_size],
+        # Construct z (with reparam. trick gradients) using mostly in-place ops
+        z0 = model.embeddings[x, :] @ (model.embeddings_A @ model.embeddings_A.T)
+        z = torch.randn([x.shape[0], x.shape[1], args.dim],
             dtype=torch.float32, device='cuda')
         z.mul_(sigma[:,None,None])
-        z.scatter_add_(
-            2,
-            x[:,:,None],
-            (x_scale * alpha[:,None,None].expand(-1,x.shape[1],-1))
-        )
+        z.add_(alpha[:,None,None] * z0)
 
         # Model forward pass
         with torch.cuda.amp.autocast():
-            logits_half = ddp_model(z, gamma)
-        logits = logits_half.float()
+            z0_reconst_half = model(z, gamma)
+        z0_reconst = z0_reconst_half.float()
 
-        # Training objective
-        heuristic = cross_entropy(logits.permute(0,2,1), x, reduction='none')
-        heuristic = gamma_prime * heuristic.mean(dim=1)
-        if not args.reweighted_loss:
-            heuristic *= (args.gamma_0 - gamma).exp()
+        # NLL computation.
+        logits = model.decode((z0 * alpha[0:1]) + (sigma[0:1] * torch.randn_like(z0)))
+        reconst_loss = cross_entropy(
+            logits.permute(0,2,1), x, reduction='none').mean()
 
-        # NLL computation. Not used in training, but computed / printed for
-        # convenience.
-        with torch.no_grad():
-            reconst_loss = F.cross_entropy(logits[0], x[0])
+        prior_loss = gaussian_kl(
+            alpha[1] * z0,
+            sigma[1],
+            torch.tensor(0., device='cuda'),
+            torch.tensor(1., device='cuda')
+        ).sum(dim=2).mean()
 
-            prior_onehot = F.one_hot(x[1,0],num_classes=vocab_size).float()
-            prior_loss = gaussian_kl(
-                alpha[1] * x_scale * prior_onehot,
-                sigma[1],
-                torch.tensor(0., device='cuda'),
-                torch.tensor(1., device='cuda')
-            ).sum()
-            
-            diffusion_loss = F.softmax(logits_half, dim=2)
-            diffusion_loss.scatter_add_(
-                2,
-                x[:,:,None],
-                -torch.ones([x.shape[0], x.shape[1], 1], device='cuda',
-                    dtype=torch.float16)
-            )
-            diffusion_loss.pow_(2)
-            diffusion_loss = diffusion_loss.sum(dim=2).mean(dim=1).float()
-            diffusion_loss.mul_(x_scale**2)
-            diffusion_loss = -0.5*(snr_prime * diffusion_loss)[2:].mean()
-            nll = reconst_loss + prior_loss + diffusion_loss
+        diffusion_loss = (z0 - z0_reconst).pow(2).sum(dim=2).mean(dim=1)
+        diffusion_loss = -0.5*(snr_prime * diffusion_loss)
+
+        nll = reconst_loss + prior_loss + diffusion_loss[2:].mean()
 
         return (
-            heuristic[2:].mean(),
             nll,
             reconst_loss,
             prior_loss
@@ -279,10 +279,10 @@ def main(**args):
     nll_ema = 0.
     def forward():
         nonlocal nll_ema
-        x = next(train_iterator)[0].cuda().long()
-        loss, nll, reconst, prior = compute_losses(x)
+        x = next(train_iterator).cuda().long()
+        nll, reconst, prior = compute_losses(x)
         nll_ema = (.9999 * nll_ema) + (.0001 * nll.item())
-        return (loss, nll, reconst, prior, torch.tensor(nll_ema))
+        return (nll, reconst, prior, torch.tensor(nll_ema))
 
     def hook(step):
         # Save weights
@@ -297,27 +297,26 @@ def main(**args):
         plt.savefig(f'gamma_{step}.jpg')
         # Compute test NLL
         with torch.no_grad():
-            x = next(test_iterator)[0].cuda().long()
+            x = next(test_iterator).cuda().long()
             losses = []
             for i in range(500):
-                _, nll, _, _ = compute_losses(x)
+                nll, _, _ = compute_losses(x)
                 losses.append(nll.item())
             print(f'Test NLL: approx. {np.mean(losses)}')
 
     lib.utils.train_loop(forward, opt, args.steps,
-        names=['nll', 'reconst', 'prior', 'nll_ema'],
+        names=['reconst', 'prior', 'nll_ema'],
         hook=hook, hook_freq=2000,
         print_freq=args.print_freq, lr_warmup_steps=100,
         lr_cooldown_steps=args.steps//10,
-        amp_autocast=False,
-        grad_accumulation_steps=args.grad_accumulation_steps
+        amp_autocast=False
     )
 
-    # Sampling (implements Appendix A.4 eqn 33 in VDM). Right now this needs
-    # float64 to work, but probably just because it was carelessly implemented.
-    torch.set_default_dtype(torch.float64)
+    # # Sampling (implements Appendix A.4 eqn 33 in VDM). Right now this needs
+    # # float64 to work, but probably just because it was carelessly implemented.
+    # torch.set_default_dtype(torch.float64)
     with torch.no_grad():
-        z = torch.randn((32, typical_seq_len, vocab_size), device='cuda')
+        z = torch.randn((32, args.seq_len, args.dim), device='cuda')
         for t in tqdm.tqdm(torch.linspace(1., 0., args.sampling_timesteps)):
             t = t[None].cuda()
             s = t - 1. / args.sampling_timesteps
@@ -328,16 +327,20 @@ def main(**args):
             sigma_squared_t = torch.sigmoid(gamma_t)
             sigma_t = sigma_squared_t.sqrt()
             with torch.cuda.amp.autocast():
-                logits_half = model(z.float(), gamma_t.float())
-            logits = logits_half.double()
-            x_pred = F.softmax(logits, dim=2)
-            x_pred.mul_(x_scale)
-            x_samples = x_pred.argmax(dim=-1)
+                z0_reconst_half = model(z.float(), gamma_t.float())
+            z0_reconst = z0_reconst_half.double()
+            # x_pred = F.softmax(logits, dim=2)
+            # x_pred.mul_(x_scale)
+            # x_samples = x_pred.argmax(dim=-1)
             if t > 0:
                 c = -torch.expm1(gamma_s - gamma_t)
-                z = z - c * (z - alpha_squared_t.sqrt() * x_pred)
+                z = z - c * (z - alpha_squared_t.sqrt() * z0_reconst)
                 z *= (alpha_squared_s/alpha_squared_t).sqrt()
                 z += (c * (1 - alpha_squared_s)).sqrt() * torch.randn_like(z)
+        with torch.cuda.amp.autocast():
+            logits_half = model.decode(z.float())
+        x_pred = F.softmax(logits_half.double(), dim=2)
+        x_samples = x_pred.argmax(dim=-1)
 
         for x in x_samples:
             x = x.tolist()
@@ -349,4 +352,4 @@ def main(**args):
     return nll_ema
 
 if __name__ == '__main__':
-    fire.Fire(lib.ddp.wrap_main(main))
+    fire.Fire(main)

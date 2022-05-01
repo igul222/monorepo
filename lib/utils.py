@@ -1,5 +1,6 @@
 import argparse
 import collections
+import functools
 import numpy as np
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -30,7 +31,11 @@ def print_model(model):
     total_params = 0
     for name, param in model.named_parameters():
         print(f"\t{name}: {list(param.shape)}")
-        total_params += param.view(-1).shape[0]
+        if len(list(param.shape)) == 0:
+            total_params += 1
+        else:
+            total_params += functools.reduce(
+                (lambda x,y: x*y), list(param.shape))
     print(f'Total parameters: {total_params:,}')
 
 def print_tensor(label, tensor):
@@ -64,7 +69,8 @@ def train_loop(
     lr_cooldown_steps=0,
     lr_warmup_steps=0,
     time_limit=None,
-    fp16=True,
+    amp_autocast=True,
+    amp_grad_scaler=True,
     grad_accumulation_steps=1):
 
     def lr_fn(step):
@@ -79,7 +85,7 @@ def train_loop(
     if not quiet:
         print_row('step', 'step time', 'loss', *names)
     histories = collections.defaultdict(lambda: [])
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_grad_scaler)
     start_time = time.time()
     for step in range(steps):
 
@@ -88,7 +94,7 @@ def train_loop(
             continue
 
         for inner_step in range(grad_accumulation_steps):
-            with torch.cuda.amp.autocast(enabled=fp16):
+            with torch.cuda.amp.autocast(enabled=amp_autocast):
                 forward_vals = forward()
                 if not isinstance(forward_vals, tuple):
                     forward_vals = (forward_vals,)
