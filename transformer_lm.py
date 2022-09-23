@@ -24,7 +24,7 @@ def main(**args):
     args.setdefault('steps', 44_000)
     args.setdefault('dim', 1024)
     args.setdefault('n_blocks', 4)
-    args.setdefault('vocab_size', 256) # 818 to match Lisa's E2E.
+    args.setdefault('vocab_size', 256)
     args.setdefault('print_freq', 1000)
 
     lib.utils.print_args(args)
@@ -32,9 +32,7 @@ def main(**args):
     if args.dataset == 'enwik8':
         train_data, _, test_data = lib.lm_datasets.enwik8()
     elif args.dataset == 'books1':
-        train_data, _, test_data = lib.lm_datasets.books1()
-    elif args.dataset == 'e2e':
-        train_data, _, test_data = lib.lm_datasets.e2e(args.vocab_size)
+        (train_data, _, test_data), _ = lib.lm_datasets.books1()
 
     train_iterator = lib.lm_datasets.random_iterator(
         train_data, args.batch_size, args.seq_len+1)

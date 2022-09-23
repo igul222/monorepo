@@ -26,18 +26,20 @@ def wrap_main(main_fn):
     Usage: instead of calling main() directly, call wrap_main(main)().
     main should take only kwargs.
     """
+    world_size = torch.cuda.device_count()
 
     def main(**args):
         os.environ['PYTHONUNBUFFERED'] = '1'
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = str(random.randint(1024, 65536))
-        world_size = torch.cuda.device_count()
-
-        mp.spawn(
-            _worker_fn,
-            (world_size, main_fn, args),
-            nprocs=world_size,
-            join=True
-        )
+        if world_size == 1:
+            _worker_fn(0, world_size, main_fn, args)
+        else:
+            mp.spawn(
+                _worker_fn,
+                (world_size, main_fn, args),
+                nprocs=world_size,
+                join=True
+            )
 
     return main

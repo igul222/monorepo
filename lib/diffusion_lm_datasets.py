@@ -37,16 +37,26 @@ def _random_iterator(data, batch_size, seq_len):
             size=[batch_size], dtype=torch.int64)
         yield _get_slices(data, offsets, seq_len), lens
 
-def _padded_random_iterator(data, batch_size, pad_token):
+def _padded_random_iterator(data, batch_size, pad_token, seq_len):
     while True:
         np.random.shuffle(data)
         for i in range(0, len(data), batch_size):
             batch = data[i:i+batch_size]
+
+            # Truncate all batch items to seq_len
+            batch = [x[:seq_len] for x in batch]
+            # Pad the first item to the full seq_len
+            batch[0] = torch.cat([
+                batch[0],
+                torch.full((seq_len - batch[0].shape[0],), pad_token)
+            ], dim=0)
+
             if len(batch) < batch_size:
                 continue
             lens = torch.tensor([len(x) for x in batch])
             batch = torch.nn.utils.rnn.pad_sequence(
                 batch, batch_first=True, padding_value=pad_token)
+
             yield batch, lens
 
 def books1_char(batch_size):
@@ -197,6 +207,7 @@ def e2e_gpt(batch_size):
 
 def rocstories(batch_size):
     vocab_size = 8192
+    seq_len = 72
 
     splits = [
         '/juice/scr/xlisali/diffusion_lm/ROCstory/roc_train.json',
@@ -224,22 +235,81 @@ def rocstories(batch_size):
                     *[word2idx.get(word, word2idx[b'UNK']) for word in text],
                     word2idx[b'END']
                 ]
-                split_data.append(torch.tensor(text))
+                split_data.append(torch.tensor(text, dtype=torch.int16))
         splits_data.append(split_data)
 
     train_data, test_data = splits_data
     pad_idx = word2idx[b'PAD']
-    train_iterator = _padded_random_iterator(train_data, batch_size, pad_idx)
-    test_iterator = _padded_random_iterator(test_data, batch_size, pad_idx)
+    train_iterator = _padded_random_iterator(train_data, batch_size, pad_idx,
+        seq_len)
+    test_iterator = _padded_random_iterator(test_data, batch_size, pad_idx,
+        seq_len)
 
     return (train_iterator, test_iterator), (word2idx, idx2word)
 
 def rocstories_gpt(batch_size):
-    # Inherit the vocab and test split from rocstories()
+    seq_len = 72
+
+    # Inherit the vocab from rocstories()
     (_, test_iterator), (word2idx, idx2word) = rocstories(batch_size)
 
-    train_data = []
+    print('Loading rocstories...')
     with open('/sailhome/igul/data/rocstories_gptj.txt', 'rb') as f:
+        train_data = f.read()
+
+    print('Computing line spans...')
+    line_spans = []
+    line_start_idx = 0
+    for newline_char in re.compile(rb'\n').finditer(train_data):
+        newline_idx = newline_char.start()
+        line_spans.append((line_start_idx, newline_idx))
+        line_start_idx = newline_idx + 1
+
+    def _make_train_iterator():
+        start_idx = word2idx[b'START']
+        unk_idx = word2idx[b'UNK']
+        end_idx = word2idx[b'END']
+        pad_idx = word2idx[b'PAD']
+        while True:
+            np.random.shuffle(line_spans)
+            for i in range(0, len(line_spans), batch_size):
+                batch = []
+                for i, j in line_spans[i:i+batch_size]:
+                    line = train_data[i:j]
+                    line = _tokenize(line)
+                    line = [
+                        start_idx,
+                        *[word2idx.get(word, unk_idx) for word in line],
+                        end_idx
+                    ]
+                    line = line[:seq_len]
+                    batch.append(torch.tensor(line, dtype=torch.int16))
+                # Pad the first item to the full seq_len
+                batch[0] = torch.cat([
+                    batch[0],
+                    torch.full((seq_len - batch[0].shape[0],), pad_idx)
+                ], dim=0)
+
+                if len(batch) < batch_size:
+                    continue
+                lens = torch.tensor([len(x) for x in batch])
+                batch = torch.nn.utils.rnn.pad_sequence(
+                    batch, batch_first=True, padding_value=pad_idx
+                )
+
+                yield batch, lens
+    train_iterator = _make_train_iterator()
+
+    return (train_iterator, test_iterator), (word2idx, idx2word)
+
+
+def rocstories_gpt_val(batch_size):
+    seq_len = 72
+
+    (_, test_iterator), (word2idx, idx2word) = rocstories_gpt(batch_size)
+
+    test_data = []
+    with open('/sailhome/igul/data/rocstories_gptj_test.txt', 'rb') as f:
         for line in tqdm.tqdm(f, mininterval=10):
             text = _tokenize(line[:-1])
             text = [
@@ -247,10 +317,10 @@ def rocstories_gpt(batch_size):
                 *[word2idx.get(word, word2idx[b'UNK']) for word in text],
                 word2idx[b'END']
             ]
-            train_data.append(torch.tensor(text))
+            test_data.append(torch.tensor(text, dtype=torch.int16))
+    test_iterator = _padded_random_iterator(test_data, batch_size, pad_idx,
+        seq_len)
 
-    pad_idx = word2idx[b'PAD']
-    train_iterator = _padded_random_iterator(train_data, batch_size, pad_idx)
     return (train_iterator, test_iterator), (word2idx, idx2word)
 
 
@@ -260,5 +330,6 @@ REGISTRY = {
     'e2e': e2e,
     'e2e_gpt': e2e_gpt,
     'rocstories': rocstories,
-    'rocstories_gpt': rocstories_gpt
+    'rocstories_gpt': rocstories_gpt,
+    'rocstories_gpt_val': rocstories_gpt_val
 }

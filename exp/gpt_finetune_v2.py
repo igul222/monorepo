@@ -43,7 +43,9 @@ if args.pretrained_path:
     if args.model == 'gptj':
         tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-j-6B")
         model = GPTJForCausalLM.from_pretrained(args.pretrained_path,
-            torch_dtype=torch.float16, low_cpu_mem_usage=True).cuda()
+            torch_dtype=torch.float16, low_cpu_mem_usage=True,
+            pad_token_id=tokenizer.eos_token_id
+        ).cuda()
     else:
         tokenizer = GPT2TokenizerFast.from_pretrained(args.model)
         model = GPT2LMHeadModel.from_pretrained(
@@ -54,7 +56,8 @@ else:
         model = GPTJForCausalLM.from_pretrained(
             "EleutherAI/gpt-j-6B", revision="float16", torch_dtype=torch.float16,
             low_cpu_mem_usage=True, cache_dir=os.path.join(
-                DATA_DIR, 'huggingface/transformers')
+                DATA_DIR, 'huggingface/transformers'),
+            pad_token_id=tokenizer.eos_token_id
         )
         device_map = {
             0: list(range(12)),
@@ -69,7 +72,8 @@ else:
         else:
             model = GPT2LMHeadModel.from_pretrained(
                 args.model,
-                cache_dir=os.path.join(DATA_DIR, 'huggingface/transformers')
+                cache_dir=os.path.join(DATA_DIR, 'huggingface/transformers'),
+                pad_token_id=tokenizer.eos_token_id
             ).cuda().half()
 lib.utils.print_model(model)
 
@@ -176,48 +180,82 @@ if args.save_pretrained:
 
 # Sampling
 print('Sampling...')
-SAMPLE_BS = 8
+
+SAMPLE_BS = 64
 MAX_SEQ_LEN = 100
 model.eval()
+
+inputs = torch.tensor(
+    [[tokenizer.bos_token_id] for _ in range(SAMPLE_BS)]).cuda()
 sents = []
 with torch.no_grad():
     for i in tqdm.tqdm(range(args.n_samples), mininterval=10):
-        samples = [[tokenizer.bos_token_id] for _ in range(SAMPLE_BS)]
-        finished = [False for _ in range(SAMPLE_BS)]
-        for j in range(MAX_SEQ_LEN):
-            X = torch.tensor(samples, device='cuda')
-            logits = model(X).logits[:, -1]
-            logits.div_(args.temperature)
-            probs = F.softmax(logits, dim=1)
-
-            # Nucleus sampling
-            probs_sort, probs_argsort = torch.sort(probs, dim=1)
-            probs_mask = 1-(probs_sort.cumsum(dim=1) < args.truncate_p).half()
-            probs_sort *= probs_mask
-            probs_sort /= probs_sort.sum(dim=1, keepdim=True)
-            probs_argsort_argsort = torch.zeros_like(probs_argsort)
-            probs_argsort_argsort.scatter_(
-                1, 
-                probs_argsort,
-                torch.arange(probs.shape[1], device='cuda')[None,:].expand(probs.shape[0], -1)
-            )
-            probs = probs_sort[
-                torch.arange(probs.shape[0], device='cuda')[:,None],
-                probs_argsort_argsort
-            ]
-
-            tokens = torch.multinomial(probs, 1)[:, 0]
-            for k in range(SAMPLE_BS):
-                samples[k].append(tokens[k].item())
-                last_token_is_eos = samples[k][-1] == tokenizer.eos_token_id
-                if last_token_is_eos and not finished[k]:
-                    sent = tokenizer.decode(samples[k][1:-1])
-                    sents.append(sent)
-                    finished[k] = True
-            if all(finished):
-                break
-        if len(sents) >= 100:
+        samples = model.generate(
+            inputs, 
+            do_sample=True, 
+            max_length=MAX_SEQ_LEN, 
+            top_p=1-args.truncate_p,
+            top_k=100_000,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=True,
+        )
+        for x in samples.tolist():
+            try:
+                eos_idx = x.index(tokenizer.eos_token_id, 1)
+            except ValueError as e:
+                continue
+            x = tokenizer.decode(x[1:eos_idx])
+            if '\n' in x:
+                continue
+            sents.append(x)
+        if len(sents) >= 1000:
             with open(f'samples.txt', 'a') as f:
                 for sent in sents:
                     f.write(sent + "\n")
             sents = []
+
+# SAMPLE_BS = 8
+# MAX_SEQ_LEN = 100
+# model.eval()
+# sents = []
+# with torch.no_grad():
+#     for i in tqdm.tqdm(range(args.n_samples), mininterval=10):
+#         samples = [[tokenizer.bos_token_id] for _ in range(SAMPLE_BS)]
+#         finished = [False for _ in range(SAMPLE_BS)]
+#         for j in range(MAX_SEQ_LEN):
+#             X = torch.tensor(samples, device='cuda')
+#             logits = model(X).logits[:, -1]
+#             logits.div_(args.temperature)
+#             probs = F.softmax(logits, dim=1)
+
+#             # Nucleus sampling
+#             probs_sort, probs_argsort = torch.sort(probs, dim=1)
+#             probs_mask = 1-(probs_sort.cumsum(dim=1) < args.truncate_p).half()
+#             probs_sort *= probs_mask
+#             probs_sort /= probs_sort.sum(dim=1, keepdim=True)
+#             probs_argsort_argsort = torch.zeros_like(probs_argsort)
+#             probs_argsort_argsort.scatter_(
+#                 1, 
+#                 probs_argsort,
+#                 torch.arange(probs.shape[1], device='cuda')[None,:].expand(probs.shape[0], -1)
+#             )
+#             probs = probs_sort[
+#                 torch.arange(probs.shape[0], device='cuda')[:,None],
+#                 probs_argsort_argsort
+#             ]
+
+#             tokens = torch.multinomial(probs, 1)[:, 0]
+#             for k in range(SAMPLE_BS):
+#                 samples[k].append(tokens[k].item())
+#                 last_token_is_eos = samples[k][-1] == tokenizer.eos_token_id
+#                 if last_token_is_eos and not finished[k]:
+#                     sent = tokenizer.decode(samples[k][1:-1])
+#                     sents.append(sent)
+#                     finished[k] = True
+#             if all(finished):
+#                 break
+#         if len(sents) >= 100:
+#             with open(f'samples.txt', 'a') as f:
+#                 for sent in sents:
+#                     f.write(sent + "\n")
+#             sents = []

@@ -1,5 +1,6 @@
 import argparse
 import collections
+import contextlib
 import functools
 import numpy as np
 import matplotlib; matplotlib.use('Agg')
@@ -68,18 +69,29 @@ def train_loop(
     resume_step=None,
     lr_cooldown_steps=0,
     lr_warmup_steps=0,
+    lr_decay=False,
     time_limit=None,
     amp_autocast=True,
     amp_grad_scaler=True,
-    grad_accumulation_steps=1):
+    grad_accumulation_steps=1,
+    ddp_models=[]
+    ):
 
-    def lr_fn(step):
-        if step < lr_warmup_steps:
-            return float(step+1) / lr_warmup_steps
-        elif step >= (steps - lr_cooldown_steps):
-            return 0.1
-        else:
-            return 1.0
+    if lr_decay:
+        assert(lr_cooldown_steps == 0)
+        def lr_fn(step):
+            if step < lr_warmup_steps:
+                return float(step) / lr_warmup_steps
+            else:
+                return 1.0 - (float(step-lr_warmup_steps) / (steps-lr_warmup_steps))
+    else:
+        def lr_fn(step):
+            if step < lr_warmup_steps:
+                return float(step+1) / lr_warmup_steps
+            elif step >= (steps - lr_cooldown_steps):
+                return 0.1
+            else:
+                return 1.0
     scheduler = optim.lr_scheduler.LambdaLR(opt, lr_fn)
 
     if not quiet:
@@ -92,14 +104,20 @@ def train_loop(
         if (resume_step is not None) and (step < resume_step):
             scheduler.step()
             continue
-
         for inner_step in range(grad_accumulation_steps):
-            with torch.cuda.amp.autocast(enabled=amp_autocast):
-                forward_vals = forward()
-                if not isinstance(forward_vals, tuple):
-                    forward_vals = (forward_vals,)
 
-            scaler.scale(forward_vals[0] / grad_accumulation_steps).backward()
+            with contextlib.ExitStack() as stack:
+                if inner_step < grad_accumulation_steps - 1:
+                    for m in ddp_models:
+                        stack.enter_context(m.no_sync())
+
+                with torch.cuda.amp.autocast(enabled=amp_autocast):
+                    forward_vals = forward()
+                    if not isinstance(forward_vals, tuple):
+                        forward_vals = (forward_vals,)
+
+                scaled_loss = forward_vals[0] / grad_accumulation_steps
+                scaler.scale(scaled_loss).backward()
 
             histories['loss'].append(forward_vals[0].item())
             for name, val in zip(names, forward_vals[1:]):
